@@ -2,14 +2,13 @@ package analyzer
 
 import (
 	"context"
-	"fmt"
 	"sync"
 )
 
 type Handshake func(context.Context) error
 
 type Client struct {
-	once      sync.Once
+	mu        sync.Mutex
 	handshake Handshake
 	err       error
 	ready     bool
@@ -17,18 +16,26 @@ type Client struct {
 
 func NewClient(handshake Handshake) *Client { return &Client{handshake: handshake} }
 
+// Read performs the handshake lazily. A successful handshake is remembered so
+// later reads reuse the established session, but a failed handshake is never
+// cached: the next read retries the handshake so a device that was offline at
+// startup (e.g. the analyzer starting a minute late) can be recovered once it
+// comes back online. Caching the failure under sync.Once is what previously
+// pinned the first "connection refused" forever and suppressed all later
+// connection attempts.
 func (c *Client) Read(ctx context.Context) error {
-	c.once.Do(func() {
-		c.err = c.handshake(ctx)
-		c.ready = c.err == nil
-	})
-	if c.err != nil {
-		return c.err
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ready {
+		return nil
 	}
-	if !c.ready {
-		return fmt.Errorf("analyzer unavailable")
-	}
-	return nil
+	c.err = c.handshake(ctx)
+	c.ready = c.err == nil
+	return c.err
 }
 
-func (c *Client) Ready() bool { return c.ready }
+func (c *Client) Ready() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ready
+}

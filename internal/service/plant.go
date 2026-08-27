@@ -129,10 +129,43 @@ func (p *Plant) Execute(ctx context.Context, action, detail string) (any, error)
 			value = parsed
 		}
 		if !p.commands.Submit(compressor.Command{Kind: kind, Value: value}) {
+			p.metrics.CountDropped()
 			return nil, errors.New("compressor command queue is full")
 		}
+		// An anti-surge trip is a latching protection: it must act on the
+		// machine immediately, not merely sit in the command queue. Latch the
+		// compressor trip, declare the interlock emergency, journal the trip so
+		// the unit record carries the action, and force the production cycle
+		// back to preparing so the campaign does not keep running while the
+		// machine is tripped.
+		if kind == compressor.AntiSurgeTrip {
+			p.session.Trip()
+			tripReason := fmt.Sprintf("anti-surge trip at load %.2f", value)
+			p.interlock.SetEmergency(tripReason)
+			incident := journal.IncidentFor(tripReason, "operator")
+			if err := p.journal.Append(incident); err != nil {
+				return nil, fmt.Errorf("journal anti-surge trip: %w", err)
+			}
+			p.metrics.CountIncident()
+			p.metrics.CountTrip()
+			// A surge trip can fire from any live cycle state, and the guarded
+			// Advance() chain only moves a campaign forward, never back to
+			// preparing. Reset the campaign to a fresh preparing cycle so
+			// production does not keep running on a tripped machine.
+			p.cycle.Reset()
+			_, ok := p.commands.Next()
+			return map[string]any{
+				"accepted":  true,
+				"dispatched": ok,
+				"kind":      kind,
+				"value":     value,
+				"tripped":   true,
+				"incident":  incident,
+				"dropped":   p.commands.Dropped(),
+			}, nil
+		}
 		command, ok := p.commands.Next()
-		return map[string]any{"accepted": true, "dispatched": ok, "kind": command.Kind, "value": command.Value}, nil
+		return map[string]any{"accepted": true, "dispatched": ok, "kind": command.Kind, "value": command.Value, "dropped": p.commands.Dropped()}, nil
 	case "analyzer-sample":
 		if err := p.analyzerClient.Read(ctx); err != nil {
 			return nil, err
@@ -203,6 +236,7 @@ func (p *Plant) Execute(ctx context.Context, action, detail string) (any, error)
 		_ = campaign.IntegrateProtection(p.cycle, equipment)
 		return map[string]any{"decision": decision, "cycle": interlock.Protect(p.cycle.Snapshot(), decision)}, nil
 	case "recover":
+		p.session.ClearTrip()
 		equipment := model.RecoverEquipment(compressor.EquipmentState(p.session), time.Now().UTC())
 		equipment = cooling.RecoverCooling(equipment)
 		interlock.Recover(p.interlock, true)

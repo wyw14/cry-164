@@ -8,11 +8,10 @@ import (
 )
 
 func RunHeating(ctx context.Context, valves []*steam.Valve, failAt int) error {
-	var valve *steam.Valve
 	for i := range valves {
-		valve = valves[i]
+		valve := valves[i]
 		valve.Open()
-		defer func() { valve.Close() }()
+		defer valve.Close()
 		if i == failAt {
 			return fmt.Errorf("heating step %d failed", i)
 		}

@@ -31,7 +31,7 @@ func (c *Coordinator) Start(ctx context.Context, plan StartupPlan) error {
 	if err := c.permit.Confirm(lubeCtx, plan.Lubrication); err != nil {
 		return fmt.Errorf("feed confirmation: %w", err)
 	}
-	stageCtx, stageCancel := context.WithTimeout(lubeCtx, plan.StageTimeout)
+	stageCtx, stageCancel := context.WithTimeout(ctx, plan.StageTimeout)
 	defer stageCancel()
 	if err := c.startup.Start(stageCtx); err != nil {
 		return fmt.Errorf("compressor startup: %w", err)
